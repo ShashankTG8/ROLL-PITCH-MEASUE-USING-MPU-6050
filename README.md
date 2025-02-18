@@ -1,2 +1,2 @@
-# ROLL-PITCH-MEASUE-USING-MPU-6050
-ARDUINO Nano with MPU 6050 and visual software as visual 4
+pin configurations A4 is SDA and A5 is SCL
+
