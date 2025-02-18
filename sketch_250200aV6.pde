@@ -1,0 +1,73 @@
+import processing.serial.*;
+
+Serial myPort;
+float roll = 0, pitch = 0;
+float zeroRoll = 0, zeroPitch = 0;  
+final float toleranceThreshold = 1.0;
+
+void setup() {
+  size(600, 600, P3D);
+
+  println("Available serial ports:");
+  for (int i = 0; i < Serial.list().length; i++) {
+    println(i + ": " + Serial.list()[i]);
+  }
+
+  String portName = Serial.list()[0];
+  myPort = new Serial(this, portName, 115200);
+  myPort.bufferUntil('\n');
+  textSize(16);
+}
+
+void draw() {
+  background(200);
+  lights();
+
+  translate(width / 2, height / 2, 0);
+  rotateX(radians(-(pitch - zeroPitch)));
+  rotateZ(radians(roll - zeroRoll));
+
+  fill(100, 200, 255);
+  stroke(0);
+  box(200, 10, 300);
+
+  drawAxes();
+
+  camera();
+  hint(DISABLE_DEPTH_TEST);
+  fill(0);
+
+  if (abs(roll - zeroRoll) <= toleranceThreshold && abs(pitch - zeroPitch) <= toleranceThreshold) {
+    text("No Movement", 10, height - 40);
+  } else {
+    text("Roll (Z-axis): " + nf(roll - zeroRoll, 1, 1) + "°", 10, height - 40);
+    text("Pitch (X-axis): " + nf(pitch - zeroPitch, 1, 1) + "°", 10, height - 20);
+  }
+
+  hint(ENABLE_DEPTH_TEST);
+}
+
+void serialEvent(Serial myPort) {
+  String data = myPort.readStringUntil('\n');
+  if (data != null) {
+    data = trim(data);
+    String[] values = split(data, ',');
+    if (values.length == 2) {
+      try {
+        roll = float(values[0]);
+        pitch = float(values[1]);
+      } catch (NumberFormatException e) {
+        println("Error parsing serial data: " + data);
+      }
+    } else {
+      println("Unexpected data format: " + data);
+    }
+  }
+}
+
+void drawAxes() {
+  stroke(255, 0, 0);
+  line(0, 0, 0, 200, 0, 0);
+  stroke(0, 255, 0);
+  line(0, 0, 0, 0, 200, 0);
+}
