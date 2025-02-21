@@ -8,20 +8,42 @@ volatile bool zeroingRequested = false;
 volatile unsigned long lastButtonPress = 0;
 const unsigned long debounceDelay = 200;  // milliseconds
 
+// Zero offsets determined at startup (or by manual zeroing)
 float rollZero = 0, pitchZero = 0;
 
+// Continuous filtered angles (do not normalize these each loop)
 float rollFiltered = 0, pitchFiltered = 0;
-const float filterAlpha = 0.98;
+const float filterAlpha = 0.95;  // Higher value favors gyro integration
 const float toleranceThreshold = 1.0;
-
 unsigned long lastTime = 0;
 
 float gyroOffsetX = 0, gyroOffsetY = 0, gyroOffsetZ = 0;
 
+// Set flipRoll to true if your sensor mounting requires reversing the roll sign.
+const bool flipRoll = false;
+
+// Normalize an angle difference into the range [-180, 180]
+float normalizeDifference(float diff) {
+  while (diff > 180.0) diff -= 360.0;
+  while (diff < -180.0) diff += 360.0;
+  return diff;
+}
+
+// Unwrap measured angle relative to a reference so that the difference is minimal.
+float unwrapAngle(float measured, float reference) {
+  float diff = measured - reference;
+  if (diff > 180.0) {
+    measured -= 360.0;
+  } else if (diff < -180.0) {
+    measured += 360.0;
+  }
+  return measured;
+}
+
+// Calibrate the gyro offsets by averaging many samples.
 void calibrateGyro() {
   const int numSamples = 500;
   long sumX = 0, sumY = 0, sumZ = 0;
-  digitalWrite(LED_BUILTIN, HIGH);  // Turn on LED during calibration
   for (int i = 0; i < numSamples; i++) {
     int16_t ax, ay, az, gx, gy, gz;
     mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
@@ -33,9 +55,29 @@ void calibrateGyro() {
   gyroOffsetX = sumX / (float)numSamples;
   gyroOffsetY = sumY / (float)numSamples;
   gyroOffsetZ = sumZ / (float)numSamples;
-  digitalWrite(LED_BUILTIN, LOW);  // Calibration complete
 }
 
+// Auto-zero: average a series of accelerometer readings to set the starting reference.
+void autoZero() {
+  const int numSamples = 50;
+  float sumRoll = 0, sumPitch = 0;
+  for (int i = 0; i < numSamples; i++) {
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    float ax_g = ax / 16384.0;
+    float ay_g = ay / 16384.0;
+    float az_g = az / 16384.0;
+    float currentRoll = (flipRoll ? 1 : -1) * atan2(ay_g, az_g) * 180.0 / PI;
+    float currentPitch = atan2(-ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 180.0 / PI;
+    sumRoll += currentRoll;
+    sumPitch += currentPitch;
+    delay(10);
+  }
+  rollZero = sumRoll / numSamples;
+  pitchZero = sumPitch / numSamples;
+}
+
+// Button ISR to trigger manual zeroing.
 void zeroingButtonPressed() {
   unsigned long currentTime = millis();
   if (currentTime - lastButtonPress > debounceDelay) {
@@ -47,79 +89,78 @@ void zeroingButtonPressed() {
 void setup() {
   Wire.begin();
   Serial.begin(115200);
-
   pinMode(buttonPin, INPUT_PULLUP);
-  pinMode(LED_BUILTIN, OUTPUT);
   attachInterrupt(digitalPinToInterrupt(buttonPin), zeroingButtonPressed, FALLING);
 
-  delay(100);
-
   mpu.initialize();
-  if (!mpu.testConnection()) {
-    Serial.println("MPU6050 connection failed!");
-    while (1);
+  while (!mpu.testConnection()) {
+    // Wait here until sensor is connected.
   }
-
   mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_500);
   mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
 
   calibrateGyro();
   lastTime = millis();
 
+  // Get an initial reading to initialize the complementary filter.
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
   float ax_g = ax / 16384.0;
   float ay_g = ay / 16384.0;
   float az_g = az / 16384.0;
-  float accelRoll = atan2(ay_g, az_g) * 180.0 / PI;
+  float accelRoll = (flipRoll ? 1 : -1) * atan2(ay_g, az_g) * 180.0 / PI;
   float accelPitch = atan2(-ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 180.0 / PI;
-
   rollFiltered = accelRoll;
   pitchFiltered = accelPitch;
+
+  autoZero();  // Set the initial zero offsets.
 }
 
 void loop() {
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  float gyroRollRate = (gx - gyroOffsetX) / 65.5;
+  // Compute gyro rates (apply flip for roll if needed).
+  float gyroRollRate = (flipRoll ? 1 : -1) * (gx - gyroOffsetX) / 65.5;
   float gyroPitchRate = (gy - gyroOffsetY) / 65.5;
 
   float ax_g = ax / 16384.0;
   float ay_g = ay / 16384.0;
   float az_g = az / 16384.0;
 
-  if (abs(ax_g) <= 1.5 && abs(ay_g) <= 1.5 && abs(az_g) <= 1.5) {
-    float accelRoll = atan2(ay_g, az_g) * 180.0 / PI;
-    float accelPitch = 0;
-    if (az_g != 0 && (ay_g * ay_g + az_g * az_g) > 0) {
-      accelPitch = atan2(-ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 180.0 / PI;
-    }
+  float accelRoll = (flipRoll ? 1 : -1) * atan2(ay_g, az_g) * 180.0 / PI;
+  float accelPitch = 0;
+  if ((ay_g * ay_g + az_g * az_g) > 0)
+    accelPitch = atan2(-ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 180.0 / PI;
 
-    unsigned long currentTime = millis();
-    float dt = (currentTime - lastTime) / 1000.0;
+  // Unwrap the accelerometer angles relative to the current filtered angles.
+  accelRoll = unwrapAngle(accelRoll, rollFiltered);
+  accelPitch = unwrapAngle(accelPitch, pitchFiltered);
 
-    rollFiltered = filterAlpha * (rollFiltered + gyroRollRate * dt) + (1 - filterAlpha) * accelRoll;
-    pitchFiltered = filterAlpha * (pitchFiltered + gyroPitchRate * dt) + (1 - filterAlpha) * accelPitch;
+  unsigned long currentTime = millis();
+  float dt = (currentTime - lastTime) / 1000.0;
+  lastTime = currentTime;
 
-    lastTime = currentTime;
+  // Complementary filter update (keep continuous values).
+  rollFiltered = filterAlpha * (rollFiltered + gyroRollRate * dt) + (1 - filterAlpha) * accelRoll;
+  pitchFiltered = filterAlpha * (pitchFiltered + gyroPitchRate * dt) + (1 - filterAlpha) * accelPitch;
+  // (Do not normalize the continuous filtered angles here.)
 
-    if (zeroingRequested) {
-      rollZero = rollFiltered;
-      pitchZero = pitchFiltered;
-      zeroingRequested = false;
-      Serial.println("Zeroing complete!");
-      delay(500);
-    }
-
-    float adjustedRoll = (abs(rollFiltered - rollZero) > toleranceThreshold) ? (rollFiltered - rollZero) : 0;
-    float adjustedPitch = (abs(pitchFiltered - pitchZero) > toleranceThreshold) ? (pitchFiltered - pitchZero) : 0;
-
-    Serial.print(adjustedRoll);
-    Serial.print(",");
-    Serial.println(adjustedPitch);
+  if (zeroingRequested) {
+    rollZero = rollFiltered;
+    pitchZero = pitchFiltered;
+    zeroingRequested = false;
   }
+
+  // Compute the adjusted (display) angles by normalizing the difference.
+  float adjustedRoll = normalizeDifference(rollFiltered - rollZero);
+  float adjustedPitch = normalizeDifference(pitchFiltered - pitchZero);
+
+  // Send a clean data line with a prefix.
+  Serial.print("DATA:");
+  Serial.print(adjustedRoll, 1);
+  Serial.print(",");
+  Serial.println(adjustedPitch, 1);
 
   delay(33);
 }
